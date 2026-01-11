@@ -6,6 +6,17 @@ import { BufferGeometryUtils } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/
 // SCENE SETUP
 // =====================
 const scene = new THREE.Scene();
+
+const earthTexture = new THREE.TextureLoader().load(
+  "https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg",
+  () => console.log("Earth texture loaded"),
+  undefined,
+  (err) => console.error("Texture load error:", err)
+);
+
+earthTexture.colorSpace = THREE.SRGBColorSpace;
+
+
 scene.background = new THREE.Color(0x000000);
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -52,10 +63,7 @@ const EARTH_RADIUS = 6_371_000;
 
 const earthGeometry = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
 const earthMaterial = new THREE.MeshPhongMaterial({
-  color: 0x2233ff,
-  wireframe: true,
-  transparent: true,
-  opacity: 0.3
+  map: earthTexture
 });
 earthGeometry.rotateX(Math.PI / 2);
 const earth = new THREE.Mesh(earthGeometry, earthMaterial);
@@ -68,9 +76,9 @@ scene.add
 // =====================
 // LAUNCHER
 // =====================
-const ROCKET_RADIUS = 50_000;
-const ROCKET_HEIGHT = 250_000;
-const CONE_HEIGHT = 50_000;
+const ROCKET_RADIUS = 10_000;
+const ROCKET_HEIGHT = 50_000;
+const CONE_HEIGHT = 10_000;
 const rocketGeo = new THREE.CylinderGeometry(ROCKET_RADIUS, ROCKET_RADIUS, ROCKET_HEIGHT, 16);
 const coneGeo = new THREE.ConeGeometry(ROCKET_RADIUS, CONE_HEIGHT, 16);
 // Translate cone geometry so its base sits exactly on the cylinder top
@@ -144,12 +152,40 @@ function llhToECEF(latDeg, lonDeg, alt) {
 // =====================
 // ORIENTATION
 // =====================
-function applyOrientation(obj, yaw, pitch, roll) {
-  obj.rotation.order = "ZYX";
-  obj.rotation.z = THREE.MathUtils.degToRad(yaw);
-  obj.rotation.x = THREE.MathUtils.degToRad(pitch);
-  obj.rotation.y = THREE.MathUtils.degToRad(roll);
+function applyOrientationENU(obj, yawDeg, pitchDeg, rollDeg, enuQuat) {
+  const yaw = THREE.MathUtils.degToRad(yawDeg);
+  const pitch = THREE.MathUtils.degToRad(pitchDeg);
+  const roll = THREE.MathUtils.degToRad(rollDeg);
+
+  // Local ENU rotation
+  const localQuat = new THREE.Quaternion()
+    .setFromEuler(new THREE.Euler(pitch, roll, yaw, "XZY"));
+    // X = pitch (Up/East plane)
+    // Z = yaw (around Up)
+
+  // Compose: ECEF ← ENU ← local
+  obj.quaternion.copy(enuQuat).multiply(localQuat);
 }
+
+
+const MIN_SEGMENT_LENGTH = 5; // meters
+
+// =====================
+// TRAJECTORY SEGMENTS
+// =====================
+let previousPosition = null;
+
+function addTrajectorySegment(p0, p1) {
+  const geometry = new THREE.BufferGeometry().setFromPoints([p0, p1]);
+
+  const material = new THREE.LineBasicMaterial({
+    color: 0xffff00
+  });
+
+  const segment = new THREE.Line(geometry, material);
+  scene.add(segment);
+}
+
 
 function computeENUFrame(latDeg, lonDeg) {
   const lat = THREE.MathUtils.degToRad(latDeg);
@@ -194,8 +230,34 @@ socket.onmessage = (event) => {
     const { lat, lon, alt } = data.position;
     const { yaw, pitch, roll } = data.orientation;
 
-    launcher.position.copy(llhToECEF(lat, lon, alt));
-    //applyOrientation(launcher, yaw, pitch, roll);
+    const launcherECEF = llhToECEF(lat, lon, alt);
+    launcher.position.copy(launcherECEF);
+    applyOrientationENU(
+      launcher,
+      yaw,
+      pitch,
+      roll,
+      enuQuaternion
+    );
+
+
+    // =====================
+    // TRAJECTORY UPDATE
+    // =====================
+    if (previousPosition) {
+      const distance = launcherECEF.distanceTo(previousPosition);
+
+      if (distance >= MIN_SEGMENT_LENGTH) {
+        addTrajectorySegment(
+          previousPosition.clone(),
+          launcherECEF.clone()
+        );
+
+        previousPosition.copy(launcherECEF);
+      }
+    } else {
+      previousPosition = launcherECEF.clone();
+    }
 
   } catch (e) {
     console.error("Invalid message", e);
